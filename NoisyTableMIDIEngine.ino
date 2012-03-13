@@ -1,18 +1,10 @@
 ////////////////////////////////////////////////////////////////////////////////
-//
-// NOISY TABLE MIDI ENGINE
-//
 ////////////////////////////////////////////////////////////////////////////////
-
-////////////////////////////////////////////////////////////////////////////////
-////////////////////////////////////////////////////////////////////////////////
-//
-//
-//
-// LOW LEVEL MIDI HANDLING
-//
-//
-//
+////
+//// NOISY TABLE MIDI ENGINE
+////
+//// J.Hotchkiss 2012
+////
 ////////////////////////////////////////////////////////////////////////////////
 ////////////////////////////////////////////////////////////////////////////////
 
@@ -36,8 +28,7 @@ enum {
     CHAN_16
 };
 
-// Assign MIDI channels to roles in the sketch
-
+// Assign MIDI channels to roles 
 #define CHAN_MONO1       CHAN_1
 #define CHAN_POLY1       CHAN_2
 #define CHAN_ARP1        CHAN_3
@@ -48,25 +39,17 @@ enum {
 #define CHAN_EVT2        CHAN_8
 #define CHAN_GLOBAL      CHAN_9
 
-
-
-// Flags for controller events
-#define O_NOINIT   0x01
-#define O_INIT64   0x02
-#define O_INIT127  0x04
-#define O_SHUFFLE  0x08
-#define O_SWEEP    0x10
-#define O_SWITCH   0x20
-#define O_RUN      0x40
-
-// Flags for note events
-#define EO_P1      0x01
-#define EO_P2      0x02
-#define EO_RUN     0x04
-
-// max ms we will wait for a mandatory midi parameter to arrive
-#define MIDI_PARAM_TIMEOUT  50
-
+///////////////////////////////////////////////////////////////////////////////
+///////////////////////////////////////////////////////////////////////////////
+////
+////
+////
+////                       M I D I   I / O
+////
+////
+////
+///////////////////////////////////////////////////////////////////////////////
+///////////////////////////////////////////////////////////////////////////////
 // state variables
 byte midiInRunningStatus;
 byte midiOutRunningStatus;
@@ -75,41 +58,135 @@ byte midiParams[2];
 byte midiSendChannel;
 
 // macros
-#define MIDI_IS_NOTE_ON(msg) ((msg & 0xf0) == 0x90)
-#define MIDI_IS_NOTE_OFF(msg) ((msg & 0xf0) == 0x80)
-#define MIDI_MK_NOTE_ON (0x90 | midiSendChannel)
-#define MIDI_MK_NOTE_OFF (0x80 | midiSendChannel)
-
-#define MIDI_NOTE 0x90
+#define MIDI_IS_NOTE_ON(msg) ((msg & 0xf0) == 0x90)  
+#define MIDI_NOTE_ON 0x90
+#define MIDI_PARAM_TIMEOUT  50  // max ms we will wait for a mandatory midi parameter to arrive
 
 // realtime synch messages
 #define MIDI_SYNCH_TICK     0xf8
 #define MIDI_SYNCH_START    0xfa
 #define MIDI_SYNCH_CONTINUE 0xfb
 #define MIDI_SYNCH_STOP     0xfc
+void midiInit()
+{
+  // init the serial port
+  Serial.begin(31250);
+  Serial.flush();
 
+  midiInRunningStatus = 0;
+  midiOutRunningStatus = 0;
+  midiNumParams = 0;
+  midiSendChannel = 0;
+}
 
-#define MIDI_GLOBAL_CC       0xb0 // Global events CC on midi channel 1
-#define MIDI_MSG_CCXY1       0xb1 // Player 1 events CC on midi channel 2
-#define MIDI_MSG_CCXY2       0xb2 // Player 2 events CC on midi channel 3
+////////////////////////////////////////////////////////////////////////////////
+// MIDI WRITE
+void midiWrite(byte statusByte, byte param1, byte param2, byte numParams)
+{
+  Serial.write(statusByte);
+  if(numParams > 0)
+    Serial.write(param1);
+   if(numParams > 1)
+     Serial.write(param2);    
+}
 
+////////////////////////////////////////////////////////////////////////////////
+// MIDI READ / THRU
+byte midiRead()
+{
+  // is anything available?
+  if(Serial.available())
+  {
+    // read next character
+    byte ch = Serial.read();
 
-//#define CHAN_GLOBAL_CC        0
+    // Is it a status byte
+    if((ch & 0x80)>0)
+    {
+      // Interpret the status byte
+      switch(ch & 0xf0)
+      {
+      case 0x80: //  Note-off  2  key  velocity  
+      case 0x90: //  Note-on  2  key  veolcity  
+      case 0xA0: //  Aftertouch  2  key  touch  
+        midiInRunningStatus = ch;
+        midiNumParams = 2;
+        break;
 
-#define EVENT_ON_COUNT 10
-#define SWEEP_RATE           20 // when sweeping XY controller this is the ms between CC outputs
+      case 0xB0: //  Continuous controller  2  controller #  controller value  
+      case 0xC0: //  Patch change  2  instrument #   
+      case 0xE0: //  Pitch bend  2  lsb (7 bits)  msb (7 bits)  
+        midiInRunningStatus = ch;
+        midiNumParams = 2;
+        break;
+
+      case 0xD0: //  Channel Pressure  1  pressure  
+        midiInRunningStatus = ch;
+        midiNumParams = 1;
+        break;
+
+      case 0xF0: //  Realtime etc, no params
+        return ch; 
+      }
+    }
+
+    // do we have an active message
+    if(midiInRunningStatus)
+    {
+      // read params for the message
+      for(int thisParam = 0; thisParam < midiNumParams; ++thisParam)
+      {
+        // they might not have arrived yet!
+        if(!Serial.available())
+        {
+          // if the next param is not ready then we need to wait
+          // for it... but not forever (we don't want to hang)
+          unsigned long midiTimeout = millis() + MIDI_PARAM_TIMEOUT;
+          while(!Serial.available())
+          {
+            if(millis() > midiTimeout)
+              return 0;
+          }
+        }
+        midiParams[thisParam] = Serial.read();
+      }
+
+      // return the status byte (caller will read params from global variables)
+      return midiInRunningStatus;
+    }
+  }
+
+  // nothing pending
+  return 0;
+}
+
+///////////////////////////////////////////////////////////////////////////////
+// MIDI SEND REALTIME
+void midiSendRealTime(byte msg)
+{
+  Serial.write(msg);
+}
 
 ///////////////////////////////////////////////////////////////////////////////
 ///////////////////////////////////////////////////////////////////////////////
 ////
 ////
 ////
-////              C O N T R O L L E R   C L A S S
+////              M I D I   C O N T R O L L E R S
 ////
 ////
 ////
 ///////////////////////////////////////////////////////////////////////////////
 ///////////////////////////////////////////////////////////////////////////////
+
+// Flags for controller events
+#define O_NOINIT   0x01    // the CC is not reset 
+#define O_INIT64   0x02    // CC is reset to value 64 (halfway pos)
+#define O_INIT127  0x04    // CC is reset to value 127 (full scale)
+#define O_SHUFFLE  0x08    // CC is reset to a random value
+#define O_SWEEP    0x10    // CC is "swept" between values
+#define O_SWITCH   0x20    // CC is an ON/OFF switch with values of 0 and 127 only
+#define O_RUN      0x40    // internally used to indicate sweep in progress
 
 // This class defines MIDI continuous controller 
 class CController {
@@ -213,6 +290,47 @@ public:
   }
 };
 
+// Declare the array of controllers
+extern CController *Controllers[];
+
+///////////////////////////////////////////////////////////////////
+// Init controllers
+void initControllers()
+{
+  CController **p = Controllers;
+  while(*p)
+  {
+    (*p)->init();
+    p++;
+  }
+}
+
+///////////////////////////////////////////////////////////////////
+// Assign controller... implement glide option
+void setController(byte id, int value)
+{
+  CController **p = Controllers;
+  while(*p)
+  {
+    if((*p)->m_id == id)
+      (*p)->set(value);    
+    p++;
+  }
+}
+
+///////////////////////////////////////////////////////////////////
+// Run controllers... implement glide option
+void runControllers()
+{
+  CController **p = Controllers;
+  while(*p)
+  {
+    if(((*p)->m_opts & O_RUN))
+      (*p)->run();    
+    p++;
+  }
+}
+
 ///////////////////////////////////////////////////////////////////////////////
 ///////////////////////////////////////////////////////////////////////////////
 ////
@@ -225,6 +343,16 @@ public:
 ///////////////////////////////////////////////////////////////////////////////
 ///////////////////////////////////////////////////////////////////////////////
 
+#define EVENTS_POLL_DELAY 10  // how many ms to wait between event counter decrements
+#define EVENT_ON_COUNT 10  // number of event polls that note event is "on"
+
+// Flags for note events
+#define EO_P1      0x01    // event goes to player 1 event channel
+#define EO_P2      0x02    // event goes to player 2 event channel
+#define EO_RUN     0x04    // event "on" flag - used internally
+
+// Class to define a "note event". This is a MIDI note which is used by the MIDI
+// engine to define some special meaning like "end of the rally"
 class CNoteEvent
 {
   byte m_count;
@@ -245,21 +373,21 @@ public:
   void fire(byte mask)
   {
     // sent to global chan
-    midiWrite(MIDI_NOTE|CHAN_GLOBAL, m_note, 127, 2);        
+    midiWrite(MIDI_NOTE_ON|CHAN_GLOBAL, m_note, 127, 2);        
     if(!!(mask & EO_P1))
-      midiWrite(MIDI_NOTE|CHAN_EVT1, m_note, 127, 2);    
+      midiWrite(MIDI_NOTE_ON|CHAN_EVT1, m_note, 127, 2);    
     if(!!(mask & EO_P2))
-      midiWrite(MIDI_NOTE|CHAN_EVT2, m_note, 127, 2);    
+      midiWrite(MIDI_NOTE_ON|CHAN_EVT2, m_note, 127, 2);    
     m_count = EVENT_ON_COUNT;
     m_mask = mask|EO_RUN;
   }
   void unfire()
   {
-    midiWrite(MIDI_NOTE|CHAN_GLOBAL, m_note, 0, 2);        
+    midiWrite(MIDI_NOTE_ON|CHAN_GLOBAL, m_note, 0, 2);        
     if(!!(m_mask & EO_P1))
-      midiWrite(MIDI_NOTE|CHAN_EVT1, m_note, 0, 2);    
+      midiWrite(MIDI_NOTE_ON|CHAN_EVT1, m_note, 0, 2);    
     if(!!(m_mask & EO_P2))
-      midiWrite(MIDI_NOTE|CHAN_EVT2, m_note, 0, 2);    
+      midiWrite(MIDI_NOTE_ON|CHAN_EVT2, m_note, 0, 2);    
     m_count = 0;
     m_mask = 0;
   }
@@ -272,13 +400,58 @@ public:
   }
 };
 
+// declare array of events
+extern CNoteEvent *Events[];
+
+///////////////////////////////////////////////////////////////////
+// Init events
+void initEvents()
+{
+  CNoteEvent **p = Events;
+  while(*p)
+  {
+    (*p)->init();
+    p++;
+  }
+}
+
+///////////////////////////////////////////////////////////////////
+// fire an event
+void fireEvent(byte note, byte mask)
+{
+  CNoteEvent **p = Events;
+  while(*p)
+  {
+    if((*p)->m_note == note)
+    {
+      (*p)->fire(mask);    
+      break;
+    }
+    p++;
+  }
+}
+
+///////////////////////////////////////////////////////////////////
+// Run events
+void runEvents()
+{
+  CNoteEvent **p = Events;
+  while(*p)
+  {
+    if(((*p)->m_mask & EO_RUN))
+      (*p)->run();    
+    p++;
+  }
+}
+
 ///////////////////////////////////////////////////////////////////////////////
 ///////////////////////////////////////////////////////////////////////////////
 //
 //
 //
 //     M I D I   N O T E   A N D   C O N T R O L L E R   M A P P I N G
-//
+// 
+//                         D E F I N I T I O N S
 //
 //
 ///////////////////////////////////////////////////////////////////////////////
@@ -314,16 +487,6 @@ enum {
   C_DODGY
 };  
 
-// The note events we support
-enum {
-  E_READY = 31,
-  E_FIRSTBOUNCE = 32,
-  E_BOUNCE = 33,
-  E_DROPPED = 34,
-  E_TIMEOUT = 35,
-  E_MISREAD = 36
-};
-
 // CC mappings for reason combinator
 enum {
   ROTARY_1 = 71,
@@ -337,15 +500,6 @@ enum {
 };
 
 // map controller events to specific controllers
-// 
-// O_NOINIT
-// O_INIT64
-// O_INIT127
-// O_SHUFFLE
-// O_SWEEP  
-// O_SWITCH 
-// O_RUN    
-
 #define MAP_CC(chan, cc, id, opts)  new CController(chan, cc, id, opts)
 CController *Controllers[] = {
   MAP_CC(  CHAN_MONO1,   ROTARY_1,   C_X1, O_SWEEP),
@@ -395,6 +549,17 @@ CController *Controllers[] = {
   NULL
 };  
 
+
+// The note events we support
+enum {
+  E_READY = 31,
+  E_FIRSTBOUNCE = 32,
+  E_BOUNCE = 33,
+  E_DROPPED = 34,
+  E_TIMEOUT = 35,
+  E_MISREAD = 36
+};
+
 // set up table of note events
 #define MAP_EV(note)  new CNoteEvent(note)
 CNoteEvent *Events[] = {
@@ -407,226 +572,18 @@ CNoteEvent *Events[] = {
   NULL
 };
 
-///////////////////////////////////////////////////////////////////
-// Init events
-void initEvents()
-{
-  CNoteEvent **p = Events;
-  while(*p)
-  {
-    (*p)->init();
-    p++;
-  }
-}
-
-///////////////////////////////////////////////////////////////////
-// fire an event
-void fireEvent(byte note, byte mask)
-{
-  CNoteEvent **p = Events;
-  while(*p)
-  {
-    if((*p)->m_note == note)
-    {
-      (*p)->fire(mask);    
-      break;
-    }
-    p++;
-  }
-}
-
-///////////////////////////////////////////////////////////////////
-// Run events
-void runEvents()
-{
-  CNoteEvent **p = Events;
-  while(*p)
-  {
-    if(((*p)->m_mask & EO_RUN))
-      (*p)->run();    
-    p++;
-  }
-}
-
-///////////////////////////////////////////////////////////////////
-// Init controllers
-void initControllers()
-{
-  CController **p = Controllers;
-  while(*p)
-  {
-    (*p)->init();
-    p++;
-  }
-}
-
-///////////////////////////////////////////////////////////////////
-// Assign controller... implement glide option
-void setController(byte id, int value)
-{
-  CController **p = Controllers;
-  while(*p)
-  {
-    if((*p)->m_id == id)
-      (*p)->set(value);    
-    p++;
-  }
-}
-
-///////////////////////////////////////////////////////////////////
-// Run controllers... implement glide option
-void runControllers()
-{
-  CController **p = Controllers;
-  while(*p)
-  {
-    if(((*p)->m_opts & O_RUN))
-      (*p)->run();    
-    p++;
-  }
-}
-
-///////////////////////////////////////////////////////////////////////////////
-///////////////////////////////////////////////////////////////////////////////
-////
-////
-////
-////                       M I D I   I / O
-////
-////
-////
-///////////////////////////////////////////////////////////////////////////////
-///////////////////////////////////////////////////////////////////////////////
-void midiInit()
-{
-  // init the serial port
-  Serial.begin(31250);
-  Serial.flush();
-
-  midiInRunningStatus = 0;
-  midiOutRunningStatus = 0;
-  midiNumParams = 0;
-  midiSendChannel = 0;
-}
-
-////////////////////////////////////////////////////////////////////////////////
-// MIDI WRITE
-void midiWrite(byte statusByte, byte param1, byte param2, byte numParams)
-{
-  // TODO: sysex passthru should set running status?
-//  if((statusByte & 0xf0) == 0xf0)
-  //{
-    // realtime byte pass straight through
-    Serial.write(statusByte);
-  //}
-  //else
-  //{
-    // send channel message
-    //if(midiOutRunningStatus != statusByte)
-    //{
-      //Serial.write(statusByte);
-      //midiOutRunningStatus = statusByte;
-    //}
-    if(numParams > 0)
-      Serial.write(param1);
-    if(numParams > 1)
-      Serial.write(param2);    
-  //}
-}
-
-////////////////////////////////////////////////////////////////////////////////
-// MIDI READ / THRU
-byte midiRead()
-{
-  // is anything available?
-  if(Serial.available())
-  {
-    // read next character
-    byte ch = Serial.read();
-
-    // Is it a status byte
-    if((ch & 0x80)>0)
-    {
-      // Interpret the status byte
-      switch(ch & 0xf0)
-      {
-      case 0x80: //  Note-off  2  key  velocity  
-      case 0x90: //  Note-on  2  key  veolcity  
-      case 0xA0: //  Aftertouch  2  key  touch  
-        midiInRunningStatus = ch;
-        midiNumParams = 2;
-        break;
-
-      case 0xB0: //  Continuous controller  2  controller #  controller value  
-      case 0xC0: //  Patch change  2  instrument #   
-      case 0xE0: //  Pitch bend  2  lsb (7 bits)  msb (7 bits)  
-        midiInRunningStatus = ch;
-        midiNumParams = 2;
-        break;
-
-      case 0xD0: //  Channel Pressure  1  pressure  
-        midiInRunningStatus = ch;
-        midiNumParams = 1;
-        break;
-
-      case 0xF0: //  Realtime etc, no params
-        return ch; 
-      }
-    }
-
-    // do we have an active message
-    if(midiInRunningStatus)
-    {
-      // read params for the message
-      for(int thisParam = 0; thisParam < midiNumParams; ++thisParam)
-      {
-        // they might not have arrived yet!
-        if(!Serial.available())
-        {
-          // if the next param is not ready then we need to wait
-          // for it... but not forever (we don't want to hang)
-          unsigned long midiTimeout = millis() + MIDI_PARAM_TIMEOUT;
-          while(!Serial.available())
-          {
-            if(millis() > midiTimeout)
-              return 0;
-          }
-        }
-        midiParams[thisParam] = Serial.read();
-      }
-
-      // return the status byte (caller will read params from global variables)
-      return midiInRunningStatus;
-    }
-  }
-
-  // nothing pending
-  return 0;
-}
-
-///////////////////////////////////////////////////////////////////////////////
-// MIDI SEND REALTIME
-void midiSendRealTime(byte msg)
-{
-  Serial.write(msg);
-}
-
-
-
-
 ///////////////////////////////////////////////////////////////////////////////
 ///////////////////////////////////////////////////////////////////////////////
 //
 //
 //
-// ARPEGGIATOR CLASS
+//                   A R P E G G I A T O R   C L A S S 
 //
 //
 //
 ///////////////////////////////////////////////////////////////////////////////
 ///////////////////////////////////////////////////////////////////////////////
-#define ARP_SEQ_LEN 32
-
+#define ARP_SEQ_LEN 32 // length of note sequence
 class CArpeggiator
 {
   byte arpSeq[ARP_SEQ_LEN];
@@ -660,7 +617,7 @@ public:
   {
     if(m_lastNote)
     {
-      midiWrite(MIDI_NOTE|m_chan, m_lastNote, 0, 2);
+      midiWrite(MIDI_NOTE_ON|m_chan, m_lastNote, 0, 2);
       m_lastNote = 0;
     }
   }
@@ -687,11 +644,11 @@ public:
       if(!m_ticks)
       {
         if(m_lastNote)
-          midiWrite(MIDI_NOTE|m_chan, m_lastNote, 0, 2);
+          midiWrite(MIDI_NOTE_ON|m_chan, m_lastNote, 0, 2);
         m_lastNote = arpSeq[index];
         index = (index + 1) % ARP_SEQ_LEN;
         if(m_lastNote)
-          midiWrite(MIDI_NOTE|m_chan, m_lastNote, 127, 2);
+          midiWrite(MIDI_NOTE_ON|m_chan, m_lastNote, 127, 2);
       }
       m_ticks = (m_ticks+1)%24;
   } 
@@ -708,9 +665,9 @@ public:
 //
 ///////////////////////////////////////////////////////////////////////////////
 ///////////////////////////////////////////////////////////////////////////////
-#define TEMPO_DROP_DELAY 500
-#define TEMPO_DROP_RATE 100
-#define METRONOME_TEMPOCC_MAX 220
+#define TEMPO_DROP_DELAY 500      // how long after last bounce that tempo starts to drop
+#define TEMPO_DROP_RATE 100       // how many ms between new tempo drop values
+#define METRONOME_TEMPOCC_MAX 220 // how many bpm map to the highest CC value for game pace
 class CMetronome {
 
   unsigned long lastEvent;
@@ -851,14 +808,18 @@ public:
   }
 };
 
-
 ///////////////////////////////////////////////////////////////////////////////
+///////////////////////////////////////////////////////////////////////////////
+//
 //
 // 
+//       P O L Y P H O N I C   C H A N N E L   C H O R D   H O L D E R 
+//
+//
 //
 ///////////////////////////////////////////////////////////////////////////////
-
-#define CHORD_LEN 4
+///////////////////////////////////////////////////////////////////////////////
+#define CHORD_LEN 4 // number of notes to hold
 class CChordHolder
 {
   byte m_chan;
@@ -874,14 +835,14 @@ public:
     for(int i=0; i<CHORD_LEN; ++i)
     {  
       if(chord[i] != 255)
-        midiWrite(MIDI_NOTE|m_chan, chord[i], 0, 2);     
+        midiWrite(MIDI_NOTE_ON|m_chan, chord[i], 0, 2);     
     }    
   }
   void addNote(byte note)
   {
     int i;
     note = constrain(note,0,127);
-    midiWrite(MIDI_NOTE|m_chan, note, 127, 2);     
+    midiWrite(MIDI_NOTE_ON|m_chan, note, 127, 2);     
     for(i=0; i<CHORD_LEN; ++i)
     {  
       if(chord[i] == note)
@@ -890,7 +851,7 @@ public:
     
     if(chord[CHORD_LEN-1] != 255)
     {
-      midiWrite(MIDI_NOTE|m_chan, chord[CHORD_LEN-1], 0, 2);     
+      midiWrite(MIDI_NOTE_ON|m_chan, chord[CHORD_LEN-1], 0, 2);     
     }
     for(i=CHORD_LEN-1; i>0; --i)
       chord[i] = chord[i-1];
@@ -903,13 +864,12 @@ public:
 //
 //
 //
-// NOTE MAP CLASS
+//                        N O T E   M A P P I N G
 //
 //
 //
 ///////////////////////////////////////////////////////////////////////////////
 ///////////////////////////////////////////////////////////////////////////////
-
 class CNoteMap
 {
 public:
@@ -946,7 +906,7 @@ public:
   {
     if(m_lastNote)
     {
-      midiWrite(MIDI_NOTE|m_chan, m_lastNote, 0, 2);
+      midiWrite(MIDI_NOTE_ON|m_chan, m_lastNote, 0, 2);
       m_lastNote = 0;
     }
   }
@@ -955,7 +915,7 @@ public:
   {
     stopLastNote();
     m_lastNote = note[col + row*8];
-    midiWrite(MIDI_NOTE|m_chan, m_lastNote, 127, 2);     
+    midiWrite(MIDI_NOTE_ON|m_chan, m_lastNote, 127, 2);     
     if(pArpeggiator)
       pArpeggiator->addNote(m_lastNote);
     if(pChordHolder)
@@ -976,9 +936,8 @@ public:
 ///////////////////////////////////////////////////////////////////////////////
 ///////////////////////////////////////////////////////////////////////////////
 
-#define EVENTS_POLL_DELAY 10
-#define ENDGAME_TICK 20
-#define RALLYLEN_CC_SCALE 2
+#define ENDGAME_TICK 20        // ms between the 127 decrements of end of game CC
+#define RALLYLEN_CC_SCALE 2    // how much to multiply number of bounces in rally into CC value 0-127
 
 ///////////////////////////////////////////////////////////////////////////////
 // MIDI controller objects
@@ -1016,6 +975,8 @@ void initRally()
   initControllers();
   fireEvent(E_READY, 0);
 }
+
+// method called at the end of a rally
 void endRally(unsigned long t)
 {
   endGame = 127;
@@ -1023,6 +984,8 @@ void endRally(unsigned long t)
   setController(C_ENDGAME, 127);
 }
 
+// method called when there is a misread from the
+// sensors
 void misread(byte whichPlayer, unsigned long t)
 {
   fireEvent(E_MISREAD, whichPlayer);
@@ -1090,7 +1053,7 @@ void bounce(byte whichPlayer, unsigned long t)
   }
 }  
 
-// this   
+// this method runs the game
 void gameRun(unsigned long t)
 {
   // run the metronome
@@ -1125,11 +1088,6 @@ void gameRun(unsigned long t)
     }
   }
 }
-
-
-
-
-
 
 ///////////////////////////////////////////////////////////////////////////////
 //
@@ -1218,7 +1176,7 @@ void heartbeatRun(unsigned long milliseconds)
 {
   if(milliseconds > heartbeatNext)
   {
-//    digitalWrite(P_HEARTBEAT, heartbeatStatus);
+    digitalWrite(P_HEARTBEAT, heartbeatStatus);
     heartbeatStatus = !heartbeatStatus;
     heartbeatNext = milliseconds + HEARTBEAT_PERIOD;    
   }
@@ -1231,30 +1189,45 @@ void heartbeatRun(unsigned long milliseconds)
 //
 //
 ////////////////////////////////////////////////////////////////////////////////
-unsigned long nextEventRun = 0;
-unsigned long nextControllerRun = 0;
+unsigned long nextEventRun;
+unsigned long nextControllerRun;
 void setup() 
 {                
+  nextEventRun = 0;
+  nextControllerRun = 0;
   midiInit();
   heartbeatInit();
   initControllers();
 }
 
+////////////////////////////////////////////////////////////////////////////////
+//
+//
+// SETUP
+//
+//
+////////////////////////////////////////////////////////////////////////////////
 void loop() 
 {
   unsigned long milliseconds = millis();
+  
+  // heartbeat
   heartbeatRun(milliseconds);
+  
+  // run input
   inputRun(milliseconds);
+  
+  // run game functions
+  gameRun(milliseconds);
 
+  // manage the controllers
   if(milliseconds > nextControllerRun)
   {
     nextControllerRun = milliseconds + 10;
     runControllers();
-  }    
-   
-  gameRun(milliseconds);
+  }        
   
-    // manage the events
+  // manage the events
   if(milliseconds > nextEventRun)
   {
     runEvents();
@@ -1263,6 +1236,8 @@ void loop()
   
 }
 
-
+//
+// EOF
+//
 
 
